@@ -1,0 +1,6 @@
+{
+  "name": "ProjectForge",
+  "description": "Build your own coding projects step by step",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
