@@ -1,4 +1,4 @@
-import { Stage } from "./aiService";
+import { Stage, ProjectBrief } from "./aiService";
 
 export type ProjectLanguage = "python" | "java" | "javascript";
 export type ProjectProficiency = "beginner" | "intermediate" | "advanced";
@@ -12,9 +12,12 @@ export interface SavedProject {
   proficiency: ProjectProficiency;
   description: string;
   status: ProjectStatus;
-  currentStage: number; // Index or stage number
+  currentStage: number;
+  questions?: any[];
+  answers?: Record<string, any>;
+  brief?: ProjectBrief;
   stages?: Stage[];
-  passedStages?: string[]; // IDs of passed stages
+  passedStages?: string[];
   createdAt: string;
 }
 
@@ -43,6 +46,9 @@ export function getProjects(userId?: string): SavedProject[] {
       description: p.description || "",
       status: p.status || "described",
       currentStage: typeof p.currentStage === "number" ? p.currentStage : 0,
+      questions: p.questions || [],
+      answers: p.answers || {},
+      brief: p.brief || undefined,
       stages: p.stages || [],
       passedStages: p.passedStages || [],
       createdAt: p.createdAt || new Date().toISOString(),

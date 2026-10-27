@@ -15,11 +15,12 @@ export function getCurrentUser(): User | null {
   }
 }
 
-export function loginUser(email: string): User {
-  const cleanEmail = email.trim() || "guest@projectforge.local";
+export function loginUser(email: string, isGuest: boolean = false): User {
+  const cleanEmail = email.trim();
+  const userId = isGuest ? "guest-user" : cleanEmail.toLowerCase();
   const user: User = {
-    id: cleanEmail === "guest" || cleanEmail.includes("guest") ? "guest-user" : `user-${btoa(cleanEmail).substring(0, 10)}`,
-    email: cleanEmail,
+    id: userId || "guest-user",
+    email: isGuest ? "guest@projectforge.local" : (cleanEmail || "user@projectforge.local"),
   };
   localStorage.setItem(USER_KEY, JSON.stringify(user));
   return user;

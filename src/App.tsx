@@ -6,6 +6,7 @@ import {
   Navigate, 
   useNavigate, 
   useParams,
+  useLocation,
   Link 
 } from 'react-router-dom';
 import { 
@@ -28,7 +29,9 @@ import {
   Play,
   HelpCircle,
   LogOut,
-  User as UserIcon
+  User as UserIcon,
+  RefreshCw,
+  Edit3
 } from 'lucide-react';
 import { 
   getCurrentUser, 
@@ -49,7 +52,7 @@ import {
   ProjectLanguage,
   ProjectProficiency 
 } from './services/projectStorage';
-import { generateStages, Stage } from './services/aiService';
+import { generateQuestions, generateBrief, generateStages, Stage, Question, ProjectBrief } from './services/aiService';
 import { runCodeCheck, RunResult } from './services/runnerService';
 
 export default function App() {
@@ -72,6 +75,8 @@ export default function App() {
             <Route path="/projects" element={user ? <ProjectsListPage user={user} /> : <Navigate to="/login" replace />} />
             <Route path="/projects/new/setup" element={user ? <SetupPage /> : <Navigate to="/login" replace />} />
             <Route path="/projects/new/describe" element={user ? <DescribePage user={user} /> : <Navigate to="/login" replace />} />
+            <Route path="/projects/:id/questions" element={user ? <QuestionsPage /> : <Navigate to="/login" replace />} />
+            <Route path="/projects/:id/brief" element={user ? <BriefPage /> : <Navigate to="/login" replace />} />
             <Route path="/projects/:id" element={user ? <ProjectDetailPage /> : <Navigate to="/login" replace />} />
             <Route path="/projects/:id/stages" element={user ? <StageViewPage /> : <Navigate to="/login" replace />} />
             
@@ -86,13 +91,16 @@ export default function App() {
 
 function Header({ user, onLogout }: { user: User | null; onLogout: () => void }) {
   const [projectCount, setProjectCount] = useState(0);
+  const location = useLocation();
   const navigate = useNavigate();
 
   useEffect(() => {
     if (user) {
       setProjectCount(getProjects(user.id).length);
+    } else {
+      setProjectCount(0);
     }
-  }, [user]);
+  }, [user, location]);
 
   const handleLogout = () => {
     logoutUser();
@@ -109,7 +117,7 @@ function Header({ user, onLogout }: { user: User | null; onLogout: () => void })
           </div>
           <span className="text-lg font-bold tracking-tight text-white flex items-center gap-2">
             ProjectForge
-            <span className="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-cyan-400 font-mono font-normal">v3.0</span>
+            <span className="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-cyan-400 font-mono font-normal">v4.0</span>
           </span>
         </Link>
 
@@ -183,13 +191,13 @@ function LoginPage({ onLogin }: { onLogin: (u: User) => void }) {
       setError('Please enter an email address.');
       return;
     }
-    const user = loginUser(email);
+    const user = loginUser(email, false);
     onLogin(user);
     navigate('/projects', { replace: true });
   };
 
   const handleGuest = () => {
-    const user = loginUser('guest');
+    const user = loginUser('guest', true);
     onLogin(user);
     navigate('/projects', { replace: true });
   };
@@ -415,7 +423,7 @@ function SetupPage() {
   return (
     <div className="max-w-3xl w-full mx-auto px-6 py-12 space-y-10">
       <div className="space-y-2 text-center max-w-xl mx-auto">
-        <span className="text-xs font-mono uppercase tracking-widest text-cyan-400 font-semibold">Step 1 of 2</span>
+        <span className="text-xs font-mono uppercase tracking-widest text-cyan-400 font-semibold">Step 1 of 3</span>
         <h1 className="text-3xl font-bold tracking-tight text-white">Configure Your Project</h1>
         <p className="text-sm text-slate-400">
           Choose your primary programming language and experience level to tailor your building journey.
@@ -580,6 +588,7 @@ function DescribePage({ user }: { user: User }) {
 
     if (hasError) return;
 
+    // Save project (status defaults to "described")
     const newProject = saveProject(
       {
         name: projectName,
@@ -590,7 +599,8 @@ function DescribePage({ user }: { user: User }) {
       user.id
     );
 
-    navigate(`/projects/${newProject.id}`, { replace: true });
+    // Navigate to follow-up questions page
+    navigate(`/projects/${newProject.id}/questions`, { replace: true });
   };
 
   const wordCount = projectDescription.trim() ? projectDescription.trim().split(/\s+/).length : 0;
@@ -617,7 +627,7 @@ function DescribePage({ user }: { user: User }) {
       </div>
 
       <div className="space-y-2">
-        <span className="text-xs font-mono uppercase tracking-widest text-cyan-400 font-semibold">Step 2 of 2</span>
+        <span className="text-xs font-mono uppercase tracking-widest text-cyan-400 font-semibold">Step 2 of 3</span>
         <h1 className="text-3xl font-bold tracking-tight text-white">Describe Your Project</h1>
         <p className="text-sm text-slate-400">
           Provide your project name and detailed description below.
@@ -696,11 +706,449 @@ function DescribePage({ user }: { user: User }) {
             type="submit"
             className="px-6 py-3.5 bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-semibold rounded-xl transition-all shadow-lg shadow-cyan-400/10 flex items-center gap-2 text-sm cursor-pointer"
           >
-            <span>Save project</span>
+            <span>Continue to questions</span>
             <ArrowRight className="w-4 h-4" />
           </button>
         </div>
       </form>
+    </div>
+  );
+}
+
+/* ========================================================
+   QUESTIONS PAGE (/projects/:id/questions)
+   ======================================================== */
+function QuestionsPage() {
+  const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const [project, setProject] = useState<SavedProject | null>(null);
+  
+  // AI state
+  const [aiQuestions, setAiQuestions] = useState<Question[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // Form answers state
+  const [answers, setAnswers] = useState<Record<string, any>>({});
+
+  const loadQuestions = async (proj: SavedProject, force: boolean = false) => {
+    setIsLoading(true);
+    setErrorMsg(null);
+    try {
+      const q = await generateQuestions(proj, force);
+      setAiQuestions(q);
+      // Cache questions on project
+      proj.questions = q;
+      updateProject(proj);
+    } catch (err: any) {
+      setErrorMsg(err.message || "Failed to generate AI questions");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!id) return;
+    const found = getProjectById(id);
+    if (found) {
+      setProject(found);
+      if (found.answers) {
+        setAnswers(found.answers);
+      }
+      if (found.questions && found.questions.length > 0) {
+        setAiQuestions(found.questions);
+      } else {
+        loadQuestions(found, false);
+      }
+    }
+  }, [id]);
+
+  const handleAnswerChange = (qId: string, val: any) => {
+    setAnswers(prev => ({ ...prev, [qId]: val }));
+  };
+
+  const handleMultiAnswerToggle = (qId: string, option: string) => {
+    setAnswers(prev => {
+      const current = Array.isArray(prev[qId]) ? prev[qId] : [];
+      if (current.includes(option)) {
+        return { ...prev, [qId]: current.filter((o: string) => o !== option) };
+      } else {
+        return { ...prev, [qId]: [...current, option] };
+      }
+    });
+  };
+
+  const handleSubmitAnswers = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!project) return;
+
+    const updated: SavedProject = {
+      ...project,
+      answers,
+      status: 'questions',
+    };
+    updateProject(updated);
+    navigate(`/projects/${project.id}/brief`);
+  };
+
+  if (!project) {
+    return <div className="text-center py-20 text-slate-400">Loading project...</div>;
+  }
+
+  return (
+    <div className="max-w-3xl w-full mx-auto px-6 py-12 space-y-8">
+      <div className="space-y-2">
+        <span className="text-xs font-mono uppercase tracking-widest text-cyan-400 font-semibold">Step 3 of 3 · Follow-up Questions</span>
+        <h1 className="text-3xl font-bold tracking-tight text-white">Project Scope & Customization</h1>
+        <p className="text-sm text-slate-400">
+          Answer these standard and AI-tailored questions to help shape your project brief and roadmap.
+        </p>
+      </div>
+
+      {isLoading ? (
+        <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-12 text-center space-y-4">
+          <RefreshCw className="w-8 h-8 text-cyan-400 animate-spin mx-auto" />
+          <p className="text-sm text-slate-300 font-mono">Generating AI follow-up questions...</p>
+        </div>
+      ) : errorMsg ? (
+        <div className="bg-red-500/10 border border-red-500/30 rounded-2xl p-6 text-center space-y-4">
+          <AlertCircle className="w-8 h-8 text-red-400 mx-auto" />
+          <p className="text-sm text-red-300 font-mono">{errorMsg}</p>
+          <button
+            onClick={() => loadQuestions(project, true)}
+            className="px-4 py-2 bg-red-500 hover:bg-red-400 text-slate-950 font-semibold rounded-xl text-xs"
+          >
+            Try again
+          </button>
+        </div>
+      ) : (
+        <form onSubmit={handleSubmitAnswers} className="space-y-8">
+          {/* Hard-coded Questions */}
+          <div className="bg-slate-900/60 border border-slate-800/80 rounded-2xl p-6 md:p-8 space-y-6">
+            <h3 className="text-sm font-mono uppercase tracking-wider text-cyan-400 font-semibold border-b border-slate-800 pb-3">
+              Standard Preferences
+            </h3>
+
+            {/* 1. Scope */}
+            <div className="space-y-3">
+              <label className="block text-sm font-semibold text-slate-200">1. Project scope</label>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                {['small demo', 'solid CV project', 'production-ready'].map((opt) => (
+                  <button
+                    key={opt}
+                    type="button"
+                    onClick={() => handleAnswerChange('scope', opt)}
+                    className={`p-3.5 rounded-xl border text-xs font-medium capitalize text-left transition-all ${
+                      answers.scope === opt 
+                        ? 'bg-cyan-500/10 border-cyan-500 text-white shadow-sm' 
+                        : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700'
+                    }`}
+                  >
+                    {opt}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* 2. Time available */}
+            <div className="space-y-3 pt-2">
+              <label className="block text-sm font-semibold text-slate-200">2. Time available</label>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                {['a weekend', 'a few weeks', 'longer'].map((opt) => (
+                  <button
+                    key={opt}
+                    type="button"
+                    onClick={() => handleAnswerChange('time', opt)}
+                    className={`p-3.5 rounded-xl border text-xs font-medium capitalize text-left transition-all ${
+                      answers.time === opt 
+                        ? 'bg-cyan-500/10 border-cyan-500 text-white shadow-sm' 
+                        : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700'
+                    }`}
+                  >
+                    {opt}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* 3. What do you want to learn (multi-select) */}
+            <div className="space-y-3 pt-2">
+              <label className="block text-sm font-semibold text-slate-200">3. What do you want to learn? (select all that apply)</label>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                {['networking', 'databases', 'APIs', 'algorithms', 'testing', 'other'].map((item) => {
+                  const isSelected = Array.isArray(answers.learn) && answers.learn.includes(item);
+                  return (
+                    <button
+                      key={item}
+                      type="button"
+                      onClick={() => handleMultiAnswerToggle('learn', item)}
+                      className={`p-3 rounded-xl border text-xs font-medium capitalize text-left transition-all flex items-center justify-between ${
+                        isSelected 
+                          ? 'bg-indigo-500/10 border-indigo-500 text-white shadow-sm' 
+                          : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700'
+                      }`}
+                    >
+                      <span>{item}</span>
+                      {isSelected && <Check className="w-3.5 h-3.5 text-indigo-400 stroke-[3]" />}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* 4. Libraries */}
+            <div className="space-y-3 pt-2">
+              <label className="block text-sm font-semibold text-slate-200">4. Implementation approach</label>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {['use libraries', 'build from scratch'].map((opt) => (
+                  <button
+                    key={opt}
+                    type="button"
+                    onClick={() => handleAnswerChange('libraries', opt)}
+                    className={`p-3.5 rounded-xl border text-xs font-medium capitalize text-left transition-all ${
+                      answers.libraries === opt 
+                        ? 'bg-cyan-500/10 border-cyan-500 text-white shadow-sm' 
+                        : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700'
+                    }`}
+                  >
+                    {opt}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* AI Tailored Questions */}
+          {aiQuestions.length > 0 && (
+            <div className="bg-slate-900/60 border border-slate-800/80 rounded-2xl p-6 md:p-8 space-y-6">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                <h3 className="text-sm font-mono uppercase tracking-wider text-indigo-400 font-semibold flex items-center gap-2">
+                  <Sparkles className="w-4 h-4" />
+                  <span>AI Project-Specific Questions</span>
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => loadQuestions(project, true)}
+                  className="text-xs text-slate-400 hover:text-white flex items-center gap-1 font-mono"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  <span>Regenerate</span>
+                </button>
+              </div>
+
+              {aiQuestions.map((q, idx) => (
+                <div key={q.id || idx} className="space-y-3 pt-2">
+                  <label className="block text-sm font-semibold text-slate-200">
+                    {idx + 5}. {q.text}
+                  </label>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {q.options.map((opt) => (
+                      <button
+                        key={opt}
+                        type="button"
+                        onClick={() => handleAnswerChange(q.id || `ai_q_${idx}`, opt)}
+                        className={`p-3.5 rounded-xl border text-xs font-medium text-left transition-all ${
+                          answers[q.id || `ai_q_${idx}`] === opt 
+                            ? 'bg-indigo-500/10 border-indigo-500 text-white shadow-sm' 
+                            : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700'
+                        }`}
+                      >
+                        {opt}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="pt-2 flex items-center justify-between">
+            <Link
+              to={`/projects/new/describe`}
+              className="text-xs font-medium text-slate-400 hover:text-white transition-colors flex items-center gap-1.5"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />
+              <span>Back to description</span>
+            </Link>
+            <button
+              type="submit"
+              className="px-6 py-3.5 bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-semibold rounded-xl transition-all shadow-lg shadow-cyan-400/10 flex items-center gap-2 text-sm cursor-pointer"
+            >
+              <span>Continue to brief</span>
+              <ArrowRight className="w-4 h-4" />
+            </button>
+          </div>
+        </form>
+      )}
+    </div>
+  );
+}
+
+/* ========================================================
+   PROJECT BRIEF PAGE (/projects/:id/brief)
+   ======================================================== */
+function BriefPage() {
+  const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const [project, setProject] = useState<SavedProject | null>(null);
+
+  const [brief, setBrief] = useState<ProjectBrief | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const [isEditing, setIsEditing] = useState(false);
+  const [editableSummary, setEditableSummary] = useState('');
+
+  const loadBrief = async (proj: SavedProject, force: boolean = false) => {
+    setIsLoading(true);
+    setErrorMsg(null);
+    try {
+      const b = await generateBrief(proj, proj.answers || {}, force);
+      setBrief(b);
+      setEditableSummary(b.summary);
+      proj.brief = b;
+      updateProject(proj);
+    } catch (err: any) {
+      setErrorMsg(err.message || "Failed to generate project brief");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!id) return;
+    const found = getProjectById(id);
+    if (found) {
+      setProject(found);
+      if (found.brief) {
+        setBrief(found.brief);
+        setEditableSummary(found.brief.summary);
+      } else {
+        loadBrief(found, false);
+      }
+    }
+  }, [id]);
+
+  const handleLooksGood = () => {
+    if (!project || !brief) return;
+
+    const updatedBrief: ProjectBrief = {
+      ...brief,
+      summary: editableSummary,
+    };
+
+    const updated: SavedProject = {
+      ...project,
+      brief: updatedBrief,
+      status: 'brief',
+    };
+    updateProject(updated);
+    navigate(`/projects/${project.id}`, { replace: true });
+  };
+
+  if (!project) {
+    return <div className="text-center py-20 text-slate-400">Loading project...</div>;
+  }
+
+  return (
+    <div className="max-w-3xl w-full mx-auto px-6 py-12 space-y-8">
+      <div className="space-y-2">
+        <span className="text-xs font-mono uppercase tracking-widest text-cyan-400 font-semibold">Project Brief</span>
+        <h1 className="text-3xl font-bold tracking-tight text-white">Generated Project Brief</h1>
+        <p className="text-sm text-slate-400">
+          Review your AI-generated project specification before generating your step-by-step building roadmap.
+        </p>
+      </div>
+
+      {isLoading ? (
+        <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-12 text-center space-y-4">
+          <RefreshCw className="w-8 h-8 text-cyan-400 animate-spin mx-auto" />
+          <p className="text-sm text-slate-300 font-mono">Synthesizing project brief with Gemini...</p>
+        </div>
+      ) : errorMsg ? (
+        <div className="bg-red-500/10 border border-red-500/30 rounded-2xl p-6 text-center space-y-4">
+          <AlertCircle className="w-8 h-8 text-red-400 mx-auto" />
+          <p className="text-sm text-red-300 font-mono">{errorMsg}</p>
+          <button
+            onClick={() => loadBrief(project, true)}
+            className="px-4 py-2 bg-red-500 hover:bg-red-400 text-slate-950 font-semibold rounded-xl text-xs"
+          >
+            Try again
+          </button>
+        </div>
+      ) : brief ? (
+        <div className="bg-slate-900/80 border border-slate-800/80 rounded-2xl p-8 space-y-6 shadow-xl">
+          <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+            <h3 className="text-lg font-semibold text-white">{project.name}</h3>
+            <div className="flex items-center gap-2 font-mono text-xs">
+              <span className="px-2.5 py-1 rounded-md bg-cyan-500/10 text-cyan-400 border border-cyan-500/25 uppercase">
+                {brief.language}
+              </span>
+              <span className="px-2.5 py-1 rounded-md bg-indigo-500/10 text-indigo-400 border border-indigo-500/25 uppercase">
+                {brief.proficiency}
+              </span>
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <h4 className="text-xs font-mono uppercase tracking-widest text-slate-400 font-semibold">Executive Summary</h4>
+              <button
+                onClick={() => setIsEditing(!isEditing)}
+                className="text-xs text-cyan-400 hover:text-cyan-300 font-medium flex items-center gap-1"
+              >
+                <Edit3 className="w-3.5 h-3.5" />
+                <span>{isEditing ? 'Done editing' : 'Edit summary'}</span>
+              </button>
+            </div>
+
+            {isEditing ? (
+              <textarea
+                rows={4}
+                value={editableSummary}
+                onChange={(e) => setEditableSummary(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-700 rounded-xl p-4 text-sm text-slate-200 focus:outline-none focus:border-cyan-500 leading-relaxed"
+              />
+            ) : (
+              <div className="bg-slate-950/60 border border-slate-800/60 rounded-xl p-5 text-slate-300 text-sm leading-relaxed">
+                {editableSummary}
+              </div>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2 font-mono text-xs">
+            <div className="bg-slate-950/50 border border-slate-800/60 rounded-xl p-3.5 space-y-1">
+              <div className="text-slate-500 uppercase">Scope</div>
+              <div className="text-white font-semibold capitalize">{brief.scope}</div>
+            </div>
+            <div className="bg-slate-950/50 border border-slate-800/60 rounded-xl p-3.5 space-y-1">
+              <div className="text-slate-500 uppercase">Architecture</div>
+              <div className="text-white font-semibold">{brief.fromScratch ? 'Build from scratch' : 'Use libraries'}</div>
+            </div>
+            <div className="bg-slate-950/50 border border-slate-800/60 rounded-xl p-3.5 space-y-1">
+              <div className="text-slate-500 uppercase">Roadmap Stages</div>
+              <div className="text-cyan-400 font-semibold">{brief.suggestedStageCount} Stages</div>
+            </div>
+          </div>
+
+          <div className="pt-4 border-t border-slate-800 flex items-center justify-between">
+            <button
+              onClick={() => loadBrief(project, true)}
+              className="text-xs text-slate-400 hover:text-white flex items-center gap-1.5 font-mono cursor-pointer"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>Regenerate brief</span>
+            </button>
+            <button
+              onClick={handleLooksGood}
+              className="px-6 py-3.5 bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-semibold rounded-xl transition-all shadow-lg shadow-cyan-400/10 text-sm flex items-center gap-2 cursor-pointer"
+            >
+              <span>Looks good</span>
+              <ArrowRight className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -714,6 +1162,7 @@ function ProjectDetailPage() {
   const [project, setProject] = useState<SavedProject | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   useEffect(() => {
     if (!id) {
@@ -728,22 +1177,26 @@ function ProjectDetailPage() {
     }
   }, [id]);
 
-  const handleGeneratePlan = () => {
+  const handleGeneratePlan = async (force: boolean = false) => {
     if (!project) return;
     setIsGenerating(true);
-    setTimeout(() => {
-      const stages = generateStages(project);
+    setErrorMsg(null);
+    try {
+      const stages = await generateStages(project, force);
       const updated: SavedProject = {
         ...project,
         stages,
         status: 'in_progress',
-        currentStage: 0,
+        currentStage: Math.max(project.currentStage, 0),
       };
       updateProject(updated);
       setProject(updated);
-      setIsGenerating(false);
       navigate(`/projects/${project.id}/stages`);
-    }, 600);
+    } catch (err: any) {
+      setErrorMsg(err.message || "Failed to generate project roadmap stages");
+    } finally {
+      setIsGenerating(false);
+    }
   };
 
   const handleDelete = () => {
@@ -815,7 +1268,7 @@ function ProjectDetailPage() {
                 {project.status.replace('_', ' ')}
               </span>
               <span className="text-xs font-mono text-slate-400">
-                {hasStages ? `Stage ${project.currentStage + 1} of ${project.stages?.length}` : 'Pending Plan'}
+                {hasStages ? `Stage ${project.currentStage + 1} of ${project.stages?.length}` : 'Pending Roadmap'}
               </span>
             </div>
             <h1 className="text-2xl md:text-3xl font-bold tracking-tight text-white">{project.name}</h1>
@@ -831,6 +1284,13 @@ function ProjectDetailPage() {
           </div>
         </div>
 
+        {project.brief && (
+          <div className="space-y-2 bg-slate-950/60 border border-slate-800/60 rounded-xl p-5">
+            <h4 className="text-xs font-mono uppercase tracking-widest text-cyan-400 font-semibold">Project Brief</h4>
+            <p className="text-slate-300 text-sm leading-relaxed">{project.brief.summary}</p>
+          </div>
+        )}
+
         <div className="space-y-3">
           <h3 className="text-xs font-mono uppercase tracking-widest text-slate-400 font-semibold">Project Description</h3>
           <div className="bg-slate-950/60 border border-slate-800/60 rounded-xl p-5 text-slate-300 text-sm md:text-base leading-relaxed whitespace-pre-wrap">
@@ -838,29 +1298,48 @@ function ProjectDetailPage() {
           </div>
         </div>
 
-        {/* Action: Generate Plan or View Stages */}
+        {errorMsg && (
+          <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 text-xs font-mono text-red-300 flex items-center justify-between">
+            <span>{errorMsg}</span>
+            <button onClick={() => handleGeneratePlan(true)} className="px-3 py-1 bg-red-500 text-slate-950 rounded font-bold">Try again</button>
+          </div>
+        )}
+
         <div className="pt-4 border-t border-slate-800/80 flex flex-col sm:flex-row items-center justify-between gap-4">
           <span className="text-xs text-slate-400 font-mono">
-            {hasStages ? 'Building plan generated.' : 'Ready to generate step-by-step roadmap.'}
+            {hasStages ? 'Building roadmap ready.' : 'Ready to generate step-by-step roadmap with Gemini.'}
           </span>
-          {hasStages ? (
-            <Link
-              to={`/projects/${project.id}/stages`}
-              className="w-full sm:w-auto px-6 py-3 bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-semibold rounded-xl transition-all shadow-lg shadow-cyan-400/10 text-sm flex items-center justify-center gap-2"
-            >
-              <span>Continue to stages</span>
-              <ArrowRight className="w-4 h-4" />
-            </Link>
-          ) : (
-            <button
-              onClick={handleGeneratePlan}
-              disabled={isGenerating}
-              className="w-full sm:w-auto px-6 py-3 bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-semibold rounded-xl transition-all shadow-lg shadow-cyan-400/10 text-sm flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
-            >
-              <Sparkles className="w-4 h-4" />
-              <span>{isGenerating ? 'Generating plan...' : 'Generate plan (demo)'}</span>
-            </button>
-          )}
+          <div className="flex items-center gap-3 w-full sm:w-auto">
+            {hasStages && (
+              <button
+                onClick={() => handleGeneratePlan(true)}
+                disabled={isGenerating}
+                className="px-4 py-3 bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium rounded-xl transition-all text-xs font-mono flex items-center justify-center gap-1.5 cursor-pointer"
+                title="Regenerate Roadmap"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Regenerate Roadmap</span>
+              </button>
+            )}
+            {hasStages ? (
+              <Link
+                to={`/projects/${project.id}/stages`}
+                className="flex-1 sm:flex-initial px-6 py-3 bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-semibold rounded-xl transition-all shadow-lg shadow-cyan-400/10 text-sm flex items-center justify-center gap-2"
+              >
+                <span>Continue to stages</span>
+                <ArrowRight className="w-4 h-4" />
+              </Link>
+            ) : (
+              <button
+                onClick={() => handleGeneratePlan(false)}
+                disabled={isGenerating}
+                className="w-full sm:w-auto px-6 py-3 bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-semibold rounded-xl transition-all shadow-lg shadow-cyan-400/10 text-sm flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+              >
+                <Sparkles className="w-4 h-4" />
+                <span>{isGenerating ? 'Generating roadmap...' : 'Generate plan (demo)'}</span>
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="flex items-center justify-between text-xs text-slate-500 pt-4 border-t border-slate-800/80 font-mono">
@@ -886,14 +1365,12 @@ function ProjectDetailPage() {
    ======================================================== */
 function StageViewPage() {
   const { id } = useParams<{ id: string }>();
-  const navigate = useNavigate();
   const [project, setProject] = useState<SavedProject | null>(null);
   const [currentStageIdx, setCurrentStageIdx] = useState(0);
   
-  // Code editor state
   const [code, setCode] = useState('');
   const [runResult, setRunResult] = useState<RunResult | null>(null);
-  const [revealedHintsCount, setRevealedHintsCount] = useState(1);
+  const [revealedHintsCount, setRevealedHintsCount] = useState(0);
   const [isCompleted, setIsCompleted] = useState(false);
 
   useEffect(() => {
@@ -929,18 +1406,16 @@ function StageViewPage() {
   const currentStage = stages[currentStageIdx] || stages[0];
   const passedStages = project.passedStages || [];
 
-  // Progress percentage
   const progressPercent = Math.round((passedStages.length / stages.length) * 100);
 
   const handleSelectStage = (idx: number) => {
-    // Can select passed stages or current/unlocked stage
     const stage = stages[idx];
     const isPassed = passedStages.includes(stage.id);
     const isUnlocked = idx <= project.currentStage;
     if (isPassed || isUnlocked) {
       setCurrentStageIdx(idx);
       setRunResult(null);
-      setRevealedHintsCount(1);
+      setRevealedHintsCount(0);
       setCode('');
     }
   };
@@ -957,14 +1432,13 @@ function StageViewPage() {
     setRunResult(result);
 
     if (result.success) {
-      // Mark stage passed
       const newPassed = Array.from(new Set([...passedStages, currentStage.id]));
-      let nextStageIdx = currentStageIdx;
+      
+      const nextStageIdx = currentStageIdx + 1;
+      const newCurrentStage = Math.max(project.currentStage, nextStageIdx < stages.length ? nextStageIdx : currentStageIdx);
+      
       let newStatus = project.status;
-
-      if (currentStageIdx + 1 < stages.length) {
-        nextStageIdx = currentStageIdx + 1;
-      } else {
+      if (newPassed.length === stages.length) {
         newStatus = 'completed';
         setIsCompleted(true);
       }
@@ -972,18 +1446,24 @@ function StageViewPage() {
       const updated: SavedProject = {
         ...project,
         passedStages: newPassed,
-        currentStage: nextStageIdx,
+        currentStage: newCurrentStage,
         status: newStatus,
       };
 
       updateProject(updated);
       setProject(updated);
+
+      if (nextStageIdx < stages.length) {
+        setCurrentStageIdx(nextStageIdx);
+        setCode('');
+        setRevealedHintsCount(0);
+        setRunResult(null);
+      }
     }
   };
 
   return (
     <div className="max-w-6xl w-full mx-auto px-4 md:px-6 py-8 flex flex-col gap-6">
-      {/* Top bar breadcrumb */}
       <div className="flex items-center justify-between border-b border-slate-800 pb-4">
         <div className="flex items-center gap-3">
           <Link
@@ -1014,7 +1494,6 @@ function StageViewPage() {
         </div>
       )}
 
-      {/* Main Grid: Left List + Right Panel */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
         {/* Left Side: Stages List */}
         <div className="lg:col-span-4 bg-slate-900/60 border border-slate-800/80 rounded-2xl p-5 space-y-4">
@@ -1065,7 +1544,6 @@ function StageViewPage() {
         {/* Right Main Panel: Stage Details & Code Runner */}
         <div className="lg:col-span-8 space-y-6">
           <div className="bg-slate-900/80 border border-slate-800/80 rounded-2xl p-6 md:p-8 space-y-6">
-            {/* Stage Header */}
             <div className="space-y-2 border-b border-slate-800 pb-5">
               <div className="flex items-center gap-2 text-xs font-mono text-cyan-400">
                 <span>STAGE {currentStageIdx + 1} OF {stages.length}</span>
@@ -1076,7 +1554,6 @@ function StageViewPage() {
               <p className="text-sm text-slate-300 leading-relaxed">{currentStage.goal}</p>
             </div>
 
-            {/* Concept & Done When */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6 text-sm">
               <div className="space-y-2 bg-slate-950/50 border border-slate-800/60 rounded-xl p-4">
                 <h4 className="text-xs font-mono uppercase tracking-wider text-cyan-400 font-semibold">Core Concept</h4>
@@ -1096,7 +1573,6 @@ function StageViewPage() {
               </div>
             </div>
 
-            {/* Test Cases */}
             <div className="space-y-3">
               <h4 className="text-xs font-mono uppercase tracking-wider text-slate-400 font-semibold">Visible Test Cases</h4>
               <div className="grid gap-3">
@@ -1115,7 +1591,6 @@ function StageViewPage() {
               </div>
             </div>
 
-            {/* Hints Section */}
             <div className="space-y-3 pt-2">
               <div className="flex items-center justify-between">
                 <h4 className="text-xs font-mono uppercase tracking-wider text-slate-400 font-semibold">Hints & Guidance</h4>
@@ -1136,10 +1611,12 @@ function StageViewPage() {
                     <span>{hint}</span>
                   </div>
                 ))}
+                {revealedHintsCount === 0 && (
+                  <p className="text-xs text-slate-500 font-mono italic">No hints revealed yet. Click "Show hint" if you need guidance.</p>
+                )}
               </div>
             </div>
 
-            {/* Code Editor & Submit */}
             <form onSubmit={handleSubmitCode} className="space-y-4 pt-4 border-t border-slate-800">
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
@@ -1157,7 +1634,6 @@ function StageViewPage() {
                 />
               </div>
 
-              {/* Run Result Panel */}
               {runResult && (
                 <div className={`rounded-xl p-4 text-xs font-mono space-y-2 animate-fadeIn ${
                   runResult.success 
